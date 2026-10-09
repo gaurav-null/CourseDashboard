@@ -1,0 +1,9 @@
+app.example.com {
+  encode gzip
+  reverse_proxy frontend:4173
+}
+
+api.example.com {
+  encode gzip
+  reverse_proxy backend:3001
+}
