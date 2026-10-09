@@ -9,8 +9,8 @@ import { buildCourseEvaluation, buildExplainability, buildPitch, evaluateCourseW
 import { courseCatalog } from './data.js';
 import { createMagicLink, deleteMagicLink, deleteSession, findCourses, getMagicLinkByToken, getMagicLinkPdfByToken, getMagicLinkPdfChunks, getSessionById, initializeDatabase, listSessions, saveEncryptedPdf, saveSession } from './db.js';
 import { deleteMeetingDocument, getMeetingDocumentById, listMeetingDocuments, saveMeetingDocument, updateMeetingDocumentAnalysis } from './db.js';
-import { analyzeMeeting, type MeetingDocument } from './meetDocuments.js';
-import { createMeetingDocument } from './meetDocuments.js';
+import { getUserGoogleToken, saveUserGoogleToken, deleteUserGoogleToken } from './db.js';
+import { analyzeMeeting, type MeetingDocument, createMeetingDocument, generateGoogleAuthUrl, exchangeGoogleCode } from './meetDocuments.js';
 import { decryptSession, encryptSession } from './session.js';
 import { chunkAndEncryptPdf, decryptAndAssemblePdf, isPdfBuffer, PDF_CHUNK_SIZE } from './pdfCrypto.js';
 
@@ -78,6 +78,10 @@ app.use(API_PREFIX, (req, res, next) => {
   // Allow public / bearer access to magic links (both generating and viewing)
   if (req.path.startsWith('/magic-link')) {
     return optionalAuth(req, res, next);
+  }
+  // Allow Google OAuth redirect callback without prior session
+  if (req.path.startsWith('/auth/google/callback')) {
+    return next();
   }
   return requireAuth(req, res, next);
 });
@@ -253,14 +257,114 @@ app.post(`${API_PREFIX}/meeting-documents`, async (req, res) => {
     return res.status(400).json({ error: 'INVALID_MEETING', message: 'Provide a Google Meet URL, meeting code, or conference record name.' });
   }
   try {
-    const document = await createMeetingDocument(meeting);
-    const saved = await saveMeetingDocument({ ...document, id: randomUUID() }, authenticatedUserId(req));
+    const userId = authenticatedUserId(req);
+    const document = await createMeetingDocument(meeting, userId);
+    const saved = await saveMeetingDocument({ ...document, id: randomUUID() }, userId);
     return res.status(201).json({ document: saved });
   } catch (error) {
     console.error('Failed to create meeting document', error);
     const message = error instanceof Error ? error.message : 'The transcript document could not be created.';
     return res.status(502).json({ error: 'MEETING_DOCUMENT_CREATION_FAILED', message });
   }
+});
+
+// Initiate Google OAuth flow
+app.get(`${API_PREFIX}/auth/google`, async (req, res) => {
+  const userId = authenticatedUserId(req);
+  if (!userId) {
+    return res.status(401).json({ error: 'UNAUTHORIZED', message: 'You must be signed in to connect Google Meet.' });
+  }
+
+  let callerOrigin: string | undefined;
+  if (req.headers.origin && typeof req.headers.origin === 'string') {
+    callerOrigin = req.headers.origin;
+  } else if (req.headers.referer && typeof req.headers.referer === 'string') {
+    try {
+      callerOrigin = new URL(req.headers.referer).origin;
+    } catch {}
+  }
+
+  const returnTo = typeof req.query.returnTo === 'string' && req.query.returnTo
+    ? req.query.returnTo
+    : (callerOrigin || 'https://course-dashboard-livid-eight.vercel.app');
+
+  const authUrl = generateGoogleAuthUrl(userId, returnTo);
+  return res.json({ url: authUrl });
+});
+
+// OAuth Callback from Google consent screen
+app.get([`${API_PREFIX}/auth/google/callback`, '/api/auth/google/callback'], async (req, res) => {
+  const code = typeof req.query.code === 'string' ? req.query.code : null;
+  const stateStr = typeof req.query.state === 'string' ? req.query.state : null;
+  const error = req.query.error;
+
+  let returnTo = 'https://course-dashboard-livid-eight.vercel.app';
+  let userId = '';
+
+  if (stateStr) {
+    try {
+      const decoded = JSON.parse(Buffer.from(stateStr, 'base64url').toString('utf-8'));
+      if (decoded.returnTo) returnTo = decoded.returnTo;
+      if (decoded.userId) userId = decoded.userId;
+    } catch {}
+  }
+
+  if (error || !code || !userId) {
+    console.error('Google OAuth callback rejected:', error || 'Missing code or userId in state');
+    const redirectUrl = new URL(returnTo);
+    redirectUrl.searchParams.set('google_auth', 'error');
+    if (error) redirectUrl.searchParams.set('google_error', String(error));
+    return res.redirect(redirectUrl.toString());
+  }
+
+  try {
+    const tokens = await exchangeGoogleCode(code);
+    await saveUserGoogleToken(userId, {
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      scope: tokens.scope,
+      token_type: tokens.token_type,
+      expiry_date: tokens.expiry_date,
+    });
+
+    const redirectUrl = new URL(returnTo);
+    redirectUrl.searchParams.set('google_auth', 'success');
+    return res.redirect(redirectUrl.toString());
+  } catch (err) {
+    console.error('Failed to exchange Google OAuth code:', err);
+    const redirectUrl = new URL(returnTo);
+    redirectUrl.searchParams.set('google_auth', 'error');
+    redirectUrl.searchParams.set('google_error', 'token_exchange_failed');
+    return res.redirect(redirectUrl.toString());
+  }
+});
+
+// Check if user has an authorized Google account connected
+app.get(`${API_PREFIX}/auth/google/status`, async (req, res) => {
+  const userId = authenticatedUserId(req);
+  if (!userId) {
+    return res.json({ connected: false });
+  }
+
+  const tokenRecord = await getUserGoogleToken(userId);
+  const hasGlobalToken = Boolean(process.env.GOOGLE_REFRESH_TOKEN || process.env.GOOGLE_MEET_REFRESH_TOKEN);
+
+  return res.json({
+    connected: Boolean(tokenRecord?.refresh_token || tokenRecord?.access_token || hasGlobalToken),
+    scope: tokenRecord?.scope ?? null,
+    updatedAt: tokenRecord?.updated_at ? new Date(tokenRecord.updated_at).toISOString() : null,
+  });
+});
+
+// Disconnect Google account
+app.post(`${API_PREFIX}/auth/google/disconnect`, async (req, res) => {
+  const userId = authenticatedUserId(req);
+  if (!userId) {
+    return res.status(401).json({ error: 'UNAUTHORIZED' });
+  }
+
+  await deleteUserGoogleToken(userId);
+  return res.json({ disconnected: true });
 });
 
 function mergeTranscriptSegments(segments: Array<string | undefined | null>): string {

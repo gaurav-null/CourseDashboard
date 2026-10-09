@@ -53,6 +53,15 @@ export type MagicLinkPdfChunkRecord = {
   created_at: Date;
 };
 
+export type UserGoogleTokenRecord = {
+  user_id: string;
+  access_token: string;
+  refresh_token: string | null;
+  scope: string | null;
+  token_type: string | null;
+  expiry_date: number | null;
+  updated_at: Date;
+};
 
 export type SavedSessionRecord = {
   id: string;
@@ -138,6 +147,16 @@ export async function initializeDatabase(): Promise<void> {
     CREATE INDEX IF NOT EXISTS magic_link_pdfs_token_idx ON magic_link_pdfs (token);
     CREATE INDEX IF NOT EXISTS magic_link_pdfs_expires_idx ON magic_link_pdfs (expires_at);
     CREATE INDEX IF NOT EXISTS magic_link_pdf_chunks_pdf_idx ON magic_link_pdf_chunks (pdf_id, chunk_index ASC);
+
+    CREATE TABLE IF NOT EXISTS user_google_tokens (
+      user_id TEXT PRIMARY KEY,
+      access_token TEXT NOT NULL,
+      refresh_token TEXT,
+      scope TEXT,
+      token_type TEXT,
+      expiry_date BIGINT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
   `);
 }
 
@@ -534,3 +553,45 @@ export async function findCourses(params: {
 
   return courseCatalog;
 }
+
+export async function saveUserGoogleToken(userId: string, tokens: {
+  access_token?: string | null;
+  refresh_token?: string | null;
+  scope?: string | null;
+  token_type?: string | null;
+  expiry_date?: number | null;
+}): Promise<void> {
+  await pool.query(`
+    INSERT INTO user_google_tokens (user_id, access_token, refresh_token, scope, token_type, expiry_date, updated_at)
+    VALUES ($1, $2, $3, $4, $5, $6, NOW())
+    ON CONFLICT (user_id) DO UPDATE SET
+      access_token = EXCLUDED.access_token,
+      refresh_token = COALESCE(EXCLUDED.refresh_token, user_google_tokens.refresh_token),
+      scope = COALESCE(EXCLUDED.scope, user_google_tokens.scope),
+      token_type = COALESCE(EXCLUDED.token_type, user_google_tokens.token_type),
+      expiry_date = COALESCE(EXCLUDED.expiry_date, user_google_tokens.expiry_date),
+      updated_at = NOW()
+  `, [
+    userId,
+    tokens.access_token ?? '',
+    tokens.refresh_token ?? null,
+    tokens.scope ?? null,
+    tokens.token_type ?? null,
+    tokens.expiry_date ?? null,
+  ]);
+}
+
+export async function getUserGoogleToken(userId: string): Promise<UserGoogleTokenRecord | null> {
+  const result = await pool.query<UserGoogleTokenRecord>(`
+    SELECT user_id, access_token, refresh_token, scope, token_type, expiry_date, updated_at
+    FROM user_google_tokens
+    WHERE user_id = $1
+    LIMIT 1
+  `, [userId]);
+  return result.rows[0] ?? null;
+}
+
+export async function deleteUserGoogleToken(userId: string): Promise<void> {
+  await pool.query(`DELETE FROM user_google_tokens WHERE user_id = $1`, [userId]);
+}
+

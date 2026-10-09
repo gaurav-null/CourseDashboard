@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import { OAuth2Client } from 'google-auth-library';
 import { authenticate } from '@google-cloud/local-auth';
 import { generateAIText } from './recommend.js';
+import { getUserGoogleToken, saveUserGoogleToken } from './db.js';
 
 export type TranscriptEntry = {
   text: string;
@@ -128,67 +129,122 @@ function getResolvedCredentialsPath(): string {
   return localRepoPath;
 }
 
+export function getGoogleOAuthConfig(redirectUri?: string) {
+  const credsPath = getResolvedCredentialsPath();
+  let clientId = process.env.GOOGLE_CLIENT_ID;
+  let clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  let configuredRedirectUri = redirectUri || process.env.GOOGLE_REDIRECT_URI;
+
+  if (fs.existsSync(credsPath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
+      const keys = parsed.web || parsed.installed || {};
+      clientId = clientId || keys.client_id;
+      clientSecret = clientSecret || keys.client_secret;
+      if (!configuredRedirectUri && Array.isArray(keys.redirect_uris) && keys.redirect_uris[0]) {
+        configuredRedirectUri = keys.redirect_uris[0];
+      }
+    } catch {}
+  }
+
+  if (!configuredRedirectUri) {
+    configuredRedirectUri = 'https://coursedashboard.onrender.com/api/auth/google/callback';
+  }
+
+  return {
+    clientId: clientId || '',
+    clientSecret: clientSecret || '',
+    redirectUri: configuredRedirectUri,
+  };
+}
+
+export function createOAuth2Client(redirectUri?: string): OAuth2Client {
+  const config = getGoogleOAuthConfig(redirectUri);
+  return new OAuth2Client({
+    clientId: config.clientId,
+    clientSecret: config.clientSecret,
+    redirectUri: config.redirectUri,
+  });
+}
+
+export function generateGoogleAuthUrl(userId: string, returnTo?: string, redirectUri?: string): string {
+  const client = createOAuth2Client(redirectUri);
+  const state = Buffer.from(JSON.stringify({
+    userId,
+    returnTo: returnTo || 'https://course-dashboard-livid-eight.vercel.app',
+  })).toString('base64url');
+
+  return client.generateAuthUrl({
+    access_type: 'offline',
+    prompt: 'consent',
+    scope: scopes,
+    state,
+  });
+}
+
+export async function exchangeGoogleCode(code: string, redirectUri?: string) {
+  const client = createOAuth2Client(redirectUri);
+  const { tokens } = await client.getToken(code);
+  return tokens;
+}
+
 type MeetAuthClient = {
   getAccessToken: () => Promise<{ token?: string | null }>;
 };
-let clientPromise: Promise<MeetAuthClient> | undefined;
 
-async function getMeetClient(): Promise<MeetAuthClient> {
-  if (!clientPromise) {
-    const refreshToken = process.env.GOOGLE_REFRESH_TOKEN || process.env.GOOGLE_MEET_REFRESH_TOKEN;
-    const credsPath = getResolvedCredentialsPath();
+export async function getUserMeetClient(userId?: string | null): Promise<MeetAuthClient> {
+  // 1. Check if specific user has their own connected Google token in PostgreSQL
+  if (userId) {
+    const userToken = await getUserGoogleToken(userId);
+    if (userToken && (userToken.refresh_token || userToken.access_token)) {
+      const client = createOAuth2Client();
+      client.setCredentials({
+        access_token: userToken.access_token,
+        refresh_token: userToken.refresh_token ?? undefined,
+        expiry_date: userToken.expiry_date ?? undefined,
+      });
 
-    // 1. Headless Cloud Mode (Render / Railway / Docker with GOOGLE_REFRESH_TOKEN)
-    if (refreshToken) {
-      let clientId = process.env.GOOGLE_CLIENT_ID;
-      let clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+      client.on('tokens', (tokens) => {
+        void saveUserGoogleToken(userId, {
+          access_token: tokens.access_token,
+          refresh_token: tokens.refresh_token ?? userToken.refresh_token,
+          expiry_date: tokens.expiry_date,
+        }).catch((err) => console.error('Failed to update refreshed Google token:', err));
+      });
 
-      if ((!clientId || !clientSecret) && fs.existsSync(credsPath)) {
-        try {
-          const parsed = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
-          const keys = parsed.installed || parsed.web || {};
-          clientId = clientId || keys.client_id;
-          clientSecret = clientSecret || keys.client_secret;
-        } catch {}
-      }
-
-      if (clientId && clientSecret) {
-        const oauth2Client = new OAuth2Client({
-          clientId,
-          clientSecret,
-        });
-        oauth2Client.setCredentials({
-          refresh_token: refreshToken,
-        });
-        clientPromise = Promise.resolve(oauth2Client);
-        return clientPromise;
-      }
+      return client;
     }
-
-    // 2. Interactive desktop OAuth (Local environment)
-    const authentication = authenticate({
-      scopes,
-      keyfilePath: credsPath,
-    });
-
-    clientPromise = Promise.race([
-      authentication,
-      new Promise<MeetAuthClient>((_, reject) => {
-        setTimeout(() => reject(new Error(
-          'Google OAuth timed out. Complete authorization in browser or configure GOOGLE_REFRESH_TOKEN for headless deployment.',
-        )), 120_000);
-      }),
-    ]).catch((error) => {
-      clientPromise = undefined;
-      throw error;
-    });
   }
 
-  return clientPromise;
+  // 2. Global fallback refresh token if configured on Render
+  const globalRefreshToken = process.env.GOOGLE_REFRESH_TOKEN || process.env.GOOGLE_MEET_REFRESH_TOKEN;
+  if (globalRefreshToken) {
+    const client = createOAuth2Client();
+    client.setCredentials({
+      refresh_token: globalRefreshToken,
+    });
+    return client;
+  }
+
+  // 3. In local desktop environment with credentials.json installed desktop app
+  const credsPath = getResolvedCredentialsPath();
+  if (fs.existsSync(credsPath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
+      if (parsed.installed && !process.env.VERCEL && !process.env.RENDER) {
+        return authenticate({
+          scopes,
+          keyfilePath: credsPath,
+        });
+      }
+    } catch {}
+  }
+
+  throw new Error('GOOGLE_MEET_NOT_CONNECTED: Please click "Connect Google Meet" to authorize your Google account.');
 }
 
-async function meetRequest<T>(resource: string, params?: Record<string, string | number>): Promise<T> {
-  const authClient = await getMeetClient();
+async function meetRequest<T>(resource: string, params?: Record<string, string | number>, userId?: string | null): Promise<T> {
+  const authClient = await getUserMeetClient(userId);
   const accessToken = await authClient.getAccessToken();
   if (!accessToken.token) {
     throw new Error('Google Meet authorization did not return an access token.');
@@ -211,7 +267,7 @@ function extractMeetingCode(value: string): string | null {
   return match?.[1]?.toLowerCase() ?? null;
 }
 
-async function resolveConferenceRecord(value: string): Promise<string> {
+async function resolveConferenceRecord(value: string, userId?: string | null): Promise<string> {
   if (value.startsWith('conferenceRecords/')) {
     return value;
   }
@@ -221,10 +277,14 @@ async function resolveConferenceRecord(value: string): Promise<string> {
     throw new Error('Enter a Google Meet URL, meeting code, or conference record name.');
   }
 
-  const response = await meetRequest<{ conferenceRecords?: Array<{ name?: string; startTime?: string }> }>('conferenceRecords', {
-    filter: `space.meeting_code = "${meetingCode}"`,
-    pageSize: 20,
-  });
+  const response = await meetRequest<{ conferenceRecords?: Array<{ name?: string; startTime?: string }> }>(
+    'conferenceRecords',
+    {
+      filter: `space.meeting_code = "${meetingCode}"`,
+      pageSize: 20,
+    },
+    userId,
+  );
   const records = (response.conferenceRecords ?? []).filter(
     (record): record is { name: string; startTime?: string } => typeof record.name === 'string' && record.name.length > 0,
   );
@@ -381,12 +441,13 @@ export function generateSampleMeetingDocument(): MeetingDocument {
   };
 }
 
-export async function createMeetingDocument(input: string): Promise<MeetingDocument> {
+export async function createMeetingDocument(input: string, userId?: string | null): Promise<MeetingDocument> {
   const trimmed = input.trim();
-  const conferenceRecordName = await resolveConferenceRecord(trimmed);
+  const conferenceRecordName = await resolveConferenceRecord(trimmed, userId);
   const transcriptResponse = await meetRequest<{ transcripts?: Array<{ name?: string; state?: unknown; endTime?: string; startTime?: string }> }>(
     `${conferenceRecordName}/transcripts`,
     { pageSize: 20 },
+    userId,
   );
   const transcript = (transcriptResponse.transcripts ?? [])
     // The API represents transcript readiness as a state object in some
@@ -402,6 +463,7 @@ export async function createMeetingDocument(input: string): Promise<MeetingDocum
   const entriesResponse = await meetRequest<{ transcriptEntries?: Array<{ text?: string; participant?: string; startTime?: string; endTime?: string }> }>(
     `${transcript.name}/entries`,
     { pageSize: 100 },
+    userId,
   );
   const labelParticipant = createParticipantLabeler();
   const entries: TranscriptEntry[] = (entriesResponse.transcriptEntries ?? [])

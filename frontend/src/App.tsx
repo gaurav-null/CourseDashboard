@@ -232,6 +232,8 @@ export default function App() {
   const [selectedDocument, setSelectedDocument] = useState<MeetingDocument | null>(null);
   const [meetingLoading, setMeetingLoading] = useState(false);
   const [meetingError, setMeetingError] = useState('');
+  const [googleConnected, setGoogleConnected] = useState(false);
+  const [googleAuthLoading, setGoogleAuthLoading] = useState(false);
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [appError, setAppError] = useState('');
   const [chatInput, setChatInput] = useState('');
@@ -298,6 +300,69 @@ export default function App() {
   };
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const authStatus = params.get('google_auth');
+    if (authStatus === 'success') {
+      setGoogleConnected(true);
+      setMeetingError('');
+      window.history.replaceState({}, '', window.location.pathname);
+    } else if (authStatus === 'error') {
+      const errDetail = params.get('google_error') || 'Access was not granted.';
+      setMeetingError(`Google connection failed: ${errDetail}`);
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
+
+  const checkGoogleStatus = async (tokenProvider: ClerkTokenProvider = getToken) => {
+    try {
+      const payload = await authenticatedGet<{ connected?: boolean }>(tokenProvider, '/api/auth/google/status');
+      setGoogleConnected(Boolean(payload.connected));
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleConnectGoogle = async () => {
+    try {
+      setGoogleAuthLoading(true);
+      setMeetingError('');
+      const token = await getToken();
+      const returnTo = window.location.origin;
+      const res = await fetch(`${BASE_URL}/api/auth/google?returnTo=${encodeURIComponent(returnTo)}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.message || 'Failed to start Google sign-in.');
+      }
+      const data = await res.json();
+      if (data.url) {
+        window.location.href = data.url;
+      }
+    } catch (err) {
+      setMeetingError(err instanceof Error ? err.message : 'Failed to connect Google account.');
+      setGoogleAuthLoading(false);
+    }
+  };
+
+  const handleDisconnectGoogle = async () => {
+    if (!window.confirm('Disconnect your Google account from GradGuide?')) return;
+    try {
+      setGoogleAuthLoading(true);
+      const token = await getToken();
+      await fetch(`${BASE_URL}/api/auth/google/disconnect`, {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      setGoogleConnected(false);
+    } catch (err) {
+      setMeetingError('Failed to disconnect Google account.');
+    } finally {
+      setGoogleAuthLoading(false);
+    }
+  };
+
+  useEffect(() => {
     if (!isLoaded || !isSignedIn) {
       clerkToken = '';
       return;
@@ -307,6 +372,7 @@ export default function App() {
       if (clerkToken) {
         void refreshSavedSessions(getToken);
         void refreshMeetingDocuments(getToken);
+        void checkGoogleStatus(getToken);
       }
     });
   }, [getToken, isLoaded, isSignedIn]);
@@ -315,6 +381,7 @@ export default function App() {
     try {
       const payload = await authenticatedGet<{ documents?: MeetingDocument[] }>(tokenProvider, '/api/meeting-documents');
       setMeetingDocuments((payload.documents ?? []).map(normalizeMeetingDocument));
+      void checkGoogleStatus(tokenProvider);
     } catch (error) {
       console.error('Failed to load meeting documents', error);
     }
@@ -323,6 +390,10 @@ export default function App() {
   const handleCreateMeetingDocument = async () => {
     const value = meetingInput.trim();
     if (!value) return;
+    if (!googleConnected) {
+      setMeetingError('Please click "Connect Google" above to authorize access to your Google Meet transcripts.');
+      return;
+    }
     setMeetingLoading(true);
     setMeetingError('');
     try {
@@ -333,7 +404,13 @@ export default function App() {
       setMeetingInput('');
     } catch (error) {
       console.error('Meeting document creation failed', error);
-      setMeetingError(error instanceof Error ? error.message : 'Could not create the meeting document.');
+      const msg = error instanceof Error ? error.message : 'Could not create the meeting document.';
+      if (msg.includes('GOOGLE_MEET_NOT_CONNECTED')) {
+        setGoogleConnected(false);
+        setMeetingError('Please click "Connect Google" above to authorize your Google account.');
+      } else {
+        setMeetingError(msg);
+      }
     } finally {
       setMeetingLoading(false);
     }
@@ -1090,19 +1167,72 @@ export default function App() {
             {/* Panel 6: Meeting Documents & Google Meet Artifacts */}
             <section className="panel documents-panel">
               <div className="section-header">
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                   <h2>🎙️ Meeting Transcripts</h2>
-                  <span className="chip warning">Google Meet</span>
+                  {googleConnected ? (
+                    <span
+                      style={{
+                        fontSize: '0.72rem',
+                        padding: '0.15rem 0.45rem',
+                        borderRadius: '9999px',
+                        background: 'rgba(16, 185, 129, 0.15)',
+                        color: '#10b981',
+                        border: '1px solid rgba(16, 185, 129, 0.3)',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '0.3rem',
+                        fontWeight: 600,
+                      }}
+                      title="Google Meet account connected"
+                    >
+                      <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#10b981' }} />
+                      Connected
+                    </span>
+                  ) : null}
                 </div>
-                <button
-                  type="button"
-                  className="secondary-button compact"
-                  style={{ padding: '0.2rem 0.6rem', fontSize: '0.8rem' }}
-                  onClick={() => void refreshMeetingDocuments(getToken)}
-                  title="Refresh meeting documents"
-                >
-                  🔄 Refresh
-                </button>
+                <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                  {googleConnected ? (
+                    <button
+                      type="button"
+                      className="secondary-button compact"
+                      style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem', opacity: 0.8 }}
+                      onClick={() => void handleDisconnectGoogle()}
+                      disabled={googleAuthLoading}
+                      title="Disconnect Google account"
+                    >
+                      Disconnect
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="secondary-button compact"
+                      style={{
+                        padding: '0.2rem 0.6rem',
+                        fontSize: '0.78rem',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '0.3rem',
+                        borderColor: '#4285f4',
+                        color: '#4285f4',
+                        fontWeight: 500,
+                      }}
+                      onClick={() => void handleConnectGoogle()}
+                      disabled={googleAuthLoading}
+                      title="Authorize your Google account to read Meet transcripts"
+                    >
+                      <span>🔗</span> {googleAuthLoading ? 'Connecting...' : 'Connect Google'}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="secondary-button compact"
+                    style={{ padding: '0.2rem 0.6rem', fontSize: '0.8rem' }}
+                    onClick={() => void refreshMeetingDocuments(getToken)}
+                    title="Refresh meeting documents"
+                  >
+                    🔄
+                  </button>
+                </div>
               </div>
               <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
                 Generate an analyzed counseling dossier from a completed Meet transcript.
