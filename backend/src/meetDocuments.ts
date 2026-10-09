@@ -2,6 +2,8 @@ import process from 'node:process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import fs from 'node:fs';
+import { OAuth2Client } from 'google-auth-library';
 import { authenticate } from '@google-cloud/local-auth';
 import { generateAIText } from './recommend.js';
 
@@ -97,23 +99,83 @@ ${JSON.stringify(questions)}`);
 }
 
 const scopes = ['https://www.googleapis.com/auth/meetings.space.readonly'];
-const credentialsPath = process.env.GOOGLE_MEET_CREDENTIALS_PATH
-  ?? resolve(dirname(fileURLToPath(import.meta.url)), '../../credentials.json');
 
-type MeetAuthClient = Awaited<ReturnType<typeof authenticate>>;
+function getResolvedCredentialsPath(): string {
+  if (process.env.GOOGLE_MEET_CREDENTIALS_PATH && fs.existsSync(process.env.GOOGLE_MEET_CREDENTIALS_PATH)) {
+    return process.env.GOOGLE_MEET_CREDENTIALS_PATH;
+  }
+  // Render Secret Files location
+  if (fs.existsSync('/etc/secrets/credentials.json')) {
+    return '/etc/secrets/credentials.json';
+  }
+  // If credentials JSON is passed directly as environment variable
+  if (process.env.GOOGLE_MEET_CREDENTIALS_JSON) {
+    const tempPath = '/tmp/credentials.json';
+    try {
+      fs.writeFileSync(tempPath, process.env.GOOGLE_MEET_CREDENTIALS_JSON, 'utf-8');
+      return tempPath;
+    } catch {}
+  }
+  // Local project root
+  const localRepoPath = resolve(dirname(fileURLToPath(import.meta.url)), '../../credentials.json');
+  if (fs.existsSync(localRepoPath)) {
+    return localRepoPath;
+  }
+  const cwdPath = resolve(process.cwd(), 'credentials.json');
+  if (fs.existsSync(cwdPath)) {
+    return cwdPath;
+  }
+  return localRepoPath;
+}
+
+type MeetAuthClient = {
+  getAccessToken: () => Promise<{ token?: string | null }>;
+};
 let clientPromise: Promise<MeetAuthClient> | undefined;
 
 async function getMeetClient(): Promise<MeetAuthClient> {
   if (!clientPromise) {
+    const refreshToken = process.env.GOOGLE_REFRESH_TOKEN || process.env.GOOGLE_MEET_REFRESH_TOKEN;
+    const credsPath = getResolvedCredentialsPath();
+
+    // 1. Headless Cloud Mode (Render / Railway / Docker with GOOGLE_REFRESH_TOKEN)
+    if (refreshToken) {
+      let clientId = process.env.GOOGLE_CLIENT_ID;
+      let clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+
+      if ((!clientId || !clientSecret) && fs.existsSync(credsPath)) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
+          const keys = parsed.installed || parsed.web || {};
+          clientId = clientId || keys.client_id;
+          clientSecret = clientSecret || keys.client_secret;
+        } catch {}
+      }
+
+      if (clientId && clientSecret) {
+        const oauth2Client = new OAuth2Client({
+          clientId,
+          clientSecret,
+        });
+        oauth2Client.setCredentials({
+          refresh_token: refreshToken,
+        });
+        clientPromise = Promise.resolve(oauth2Client);
+        return clientPromise;
+      }
+    }
+
+    // 2. Interactive desktop OAuth (Local environment)
     const authentication = authenticate({
       scopes,
-      keyfilePath: credentialsPath,
+      keyfilePath: credsPath,
     });
+
     clientPromise = Promise.race([
       authentication,
       new Promise<MeetAuthClient>((_, reject) => {
         setTimeout(() => reject(new Error(
-          'Google OAuth timed out. Complete the authorization in the browser, add your account as an OAuth test user, then try again.',
+          'Google OAuth timed out. Complete authorization in browser or configure GOOGLE_REFRESH_TOKEN for headless deployment.',
         )), 120_000);
       }),
     ]).catch((error) => {
