@@ -1,4 +1,4 @@
-<div style="padding:75% 0 0 0;position:relative;"><iframe src="https://player.vimeo.com/video/1234444987?badge=0&amp;autopause=0&amp;player_id=0&amp;app_id=58479" frameborder="0" allow="autoplay; fullscreen; picture-in-picture; clipboard-write; encrypted-media; web-share" referrerpolicy="strict-origin-when-cross-origin" style="position:absolute;top:0;left:0;width:100%;height:100%;" title="2026-10-09 20-40-10"></iframe></div><script src="https://player.vimeo.com/api/player.js"></script>
+https://player.vimeo.com/video/1234444987?badge=0&amp;autopause=0&amp;player_id=0&amp;app_id=58479
 
 
 Course Assistant is a course recommendation assistant for counselors running live sessions with students. This repository is the starting point for a practical, low-cost deployment model that avoids unnecessary cloud spending while keeping the app production-aware.
