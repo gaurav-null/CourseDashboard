@@ -1,25 +1,16 @@
-# GradGuide
+<div style="padding:75% 0 0 0;position:relative;"><iframe src="https://player.vimeo.com/video/1234444987?badge=0&amp;autopause=0&amp;player_id=0&amp;app_id=58479" frameborder="0" allow="autoplay; fullscreen; picture-in-picture; clipboard-write; encrypted-media; web-share" referrerpolicy="strict-origin-when-cross-origin" style="position:absolute;top:0;left:0;width:100%;height:100%;" title="2026-10-09 20-40-10"></iframe></div><script src="https://player.vimeo.com/api/player.js"></script>
 
-GradGuide is a course recommendation assistant for counselors running live sessions with students. This repository is the starting point for a practical, low-cost deployment model that avoids unnecessary cloud spending while keeping the app production-aware.
+
+Course Assistant is a course recommendation assistant for counselors running live sessions with students. This repository is the starting point for a practical, low-cost deployment model that avoids unnecessary cloud spending while keeping the app production-aware.
 
 ## Included in this scaffold
 
 - `backend/` — TypeScript API with a working example `/recommend` endpoint
 - `frontend/` — React + Vite starter that can consume the API
-- `infra/` — optional infrastructure notes and legacy deployment scaffolding; the primary target deployment is a homelab stack, not a vendor-managed cloud stack
+- `infra/` — optional infrastructure notes
 - `scripts/` — seeding helpers and utilities
 - `Docs/` — architecture, roadmap, strategy, and evaluation notes
 
-## Recommended deployment model
-
-For this assignment, use a homelab-first deployment strategy:
-
-- `frontend`: self-hosted on your homelab or a small VM behind Caddy
-- `backend`: runs on the same homelab machine or a private internal server
-- `private access`: Azure + Tailscale for secure internal connectivity and remote access
-- `public exposure`: Caddy reverse proxy with your domain and TLS termination
-- `database`: PostgreSQL in Docker on the homelab
-- `cache`: Redis in Docker on the homelab
 
 This keeps cost low, gives you control over the stack, and still demonstrates good production thinking without requiring a heavy managed cloud deployment.
 
@@ -35,7 +26,7 @@ Use the env template in `.env.example` to configure `DATABASE_URL`, `REDIS_URL`,
 
 ### Clerk authentication
 
-GradGuide requires Clerk authentication. Configure the backend secret and frontend publishable key:
+This proj uses Clerk authentication. Configure the backend secret and frontend publishable key:
 
 ```env
 # backend/.env or the root .env loaded by the backend
@@ -59,7 +50,7 @@ The dashboard can generate a document after a Google Meet ends and its transcrip
 
 The generated document includes the transcript, detected questions and replies, topic mentions, word count, duration, and response statistics. Transcription must have been enabled for the meeting, and Google Workspace may take a short time to publish the artifact. The OAuth file is ignored by Git and must never be committed.
 
-Open a generated document to run structured AI analysis and download a Word-compatible `.doc` file containing the analysis, transcript, questions, replies, and analytics. If AI credentials are unavailable, GradGuide labels and uses a deterministic fallback instead of silently claiming AI analysis.
+Open a generated document to run structured AI analysis and download a Word-compatible `.doc` file containing the analysis, transcript, questions, replies, and analytics. If AI credentials are unavailable, it labels and uses a deterministic fallback instead of silently claiming AI analysis.
 
 
 Then in another terminal:
@@ -81,13 +72,11 @@ This starts local PostgreSQL and Redis instances for the project.
 Initialize and seed PostgreSQL:
 
 ```bash
-docker compose exec -T postgres psql -U gradguide -d gradguide < backend/schema.sql
+docker compose exec -T postgres psql -U gradgu
+
+ide -d gradguide < backend/schema.sql
 npm run seed --workspace backend
 ```
 
 The seed script inserts 60 deterministic course records. The backend's
 `POST /api/recommend` endpoint reads these records through parameterized SQL.
-
-## Phase 0 status
-
-This repository currently establishes the monorepo structure and core implementation skeleton for the roadmap's Phase 0 work, using a local-first and homelab-friendly architecture.
