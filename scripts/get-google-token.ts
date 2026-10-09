@@ -1,10 +1,26 @@
+import fs from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { authenticate } from '@google-cloud/local-auth';
-import { resolve } from 'node:path';
 
 const scopes = ['https://www.googleapis.com/auth/meetings.space.readonly'];
-const keyfilePath = resolve(process.cwd(), 'credentials.json');
+
+function findCredentialsFile(): string {
+  const candidates = [
+    resolve(dirname(fileURLToPath(import.meta.url)), '../credentials.json'),
+    resolve(process.cwd(), 'credentials.json'),
+    resolve(process.cwd(), '../credentials.json'),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return candidates[0];
+}
+
+const keyfilePath = findCredentialsFile();
 
 async function main() {
+  console.log(`Using credentials file: ${keyfilePath}`);
   console.log('Opening browser for Google Meet authorization...');
   const auth = await authenticate({
     scopes,
@@ -24,3 +40,4 @@ async function main() {
 }
 
 main().catch(console.error);
+
