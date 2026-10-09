@@ -15,17 +15,33 @@ import { decryptSession, encryptSession } from './session.js';
 import { chunkAndEncryptPdf, decryptAndAssemblePdf, isPdfBuffer, PDF_CHUNK_SIZE } from './pdfCrypto.js';
 
 const app = express();
+const configuredOrigins = (process.env.CORS_ORIGIN ?? '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
 const allowedOrigins = new Set([
-  process.env.CORS_ORIGIN,
+  ...configuredOrigins,
   'http://localhost:5173',
   'http://127.0.0.1:5173',
   'http://localhost:4173',
   'http://127.0.0.1:4173',
-].filter((value): value is string => typeof value === 'string' && value.length > 0));
+]);
 
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.size === 0 || allowedOrigins.has(origin)) {
+    // Allow non-browser requests (e.g. server-to-server, curl, mobile)
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+
+    if (
+      allowedOrigins.has(origin) ||
+      allowedOrigins.has('*') ||
+      process.env.CORS_ALLOW_ALL === 'true' ||
+      origin.endsWith('.vercel.app')
+    ) {
       callback(null, true);
       return;
     }
@@ -34,6 +50,29 @@ app.use(cors({
   },
   credentials: true,
 }));
+
+export function getMagicLinkBaseUrl(req: express.Request): string {
+  if (process.env.MAGIC_LINK_BASE_URL) {
+    return process.env.MAGIC_LINK_BASE_URL.replace(/\/+$/, '');
+  }
+
+  const origin = req.headers.origin;
+  if (origin && typeof origin === 'string' && origin.startsWith('http')) {
+    return `${origin.replace(/\/+$/, '')}/magic`;
+  }
+
+  const referer = req.headers.referer;
+  if (referer && typeof referer === 'string' && referer.startsWith('http')) {
+    try {
+      const parsedUrl = new URL(referer);
+      return `${parsedUrl.origin}/magic`;
+    } catch {
+      // Fall through to default
+    }
+  }
+
+  return 'http://localhost:5173/magic';
+}
 app.use(express.json({ limit: '50mb' }));
 app.use(API_PREFIX, (req, res, next) => {
   // Allow public / bearer access to magic links (both generating and viewing)
@@ -1067,7 +1106,7 @@ app.post(`${API_PREFIX}/magic-link/pdf`, async (req, res) => {
       chunks,
     });
 
-    const baseUrl = process.env.MAGIC_LINK_BASE_URL ?? 'http://localhost:5173/magic';
+    const baseUrl = getMagicLinkBaseUrl(req);
 
     return res.status(201).json({
       token,
@@ -1115,7 +1154,7 @@ app.post(`${API_PREFIX}/magic-link`, async (req, res) => {
       ownerId: authenticatedUserId(req),
     });
 
-    const baseUrl = process.env.MAGIC_LINK_BASE_URL ?? 'http://localhost:5173/magic';
+    const baseUrl = getMagicLinkBaseUrl(req);
 
     return res.status(201).json({
       token,
@@ -1221,6 +1260,11 @@ app.get(`${API_PREFIX}/magic-link/:token/pdf`, async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`GradGuide backend listening on http://localhost:${PORT}`);
-});
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`GradGuide backend listening on http://localhost:${PORT}`);
+  });
+}
+
+export { app };
+export default app;

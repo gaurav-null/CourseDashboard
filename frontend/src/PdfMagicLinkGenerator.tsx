@@ -132,9 +132,20 @@ export function PdfMagicLinkGenerator({ onOpenViewer, getToken, isOpen, onClose 
       }
 
       const result = (await response.json()) as GeneratedLinkInfo;
+      const currentOrigin = typeof window !== 'undefined' && window.location.origin ? window.location.origin : '';
+      const finalUrl = (result.url && result.url.includes('localhost') && currentOrigin && !currentOrigin.includes('localhost'))
+        ? `${currentOrigin}/magic/${result.token}`
+        : (result.url || `${currentOrigin}/magic/${result.token}`);
+
+      const sanitizedResult = {
+        ...result,
+        url: finalUrl,
+        link: finalUrl,
+      };
+
       setUploadProgress(100);
       setUploadStatus('Encryption complete!');
-      setGeneratedInfo(result);
+      setGeneratedInfo(sanitizedResult);
     } catch (err) {
       console.error('Failed to generate PDF magic link:', err);
       setError(err instanceof Error ? err.message : 'Upload and encryption failed.');

@@ -8,9 +8,16 @@ const { Pool } = pg;
 
 const databaseUrl = process.env.DATABASE_URL ?? 'postgresql://gradguide:localdev@localhost:5432/gradguide';
 
+const isProduction = process.env.NODE_ENV === 'production' || !!process.env.VERCEL || !!process.env.RENDER;
+const useSsl =
+  process.env.DATABASE_SSL === 'true' ||
+  (isProduction && !databaseUrl.includes('localhost') && !databaseUrl.includes('127.0.0.1')) ||
+  databaseUrl.includes('sslmode=require');
+
 export const pool = new Pool({
   connectionString: databaseUrl,
   max: Number(process.env.DATABASE_MAX_CONNECTIONS ?? 5),
+  ssl: useSsl ? { rejectUnauthorized: false } : undefined,
 });
 
 export type MagicLinkRecord = {
